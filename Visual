@@ -1,0 +1,418 @@
+-- ══════════════════════════════════════════════════════════
+--  Carbon Visuals — Visual Spawner
+-- ══════════════════════════════════════════════════════════
+
+-- wait for the place to finish initial load before running anything;
+-- prevents missing services / unstreamed instances on early-injection.
+if not game:IsLoaded() then
+    repeat task.wait() until game:IsLoaded()
+end
+
+local Players          = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RunService       = game:GetService("RunService")
+local CoreGui          = game:GetService("CoreGui")
+local RS               = game:GetService("ReplicatedStorage")
+local LocalPlayer      = Players.LocalPlayer
+local BrainrotAssets   = nil
+pcall(function()
+    BrainrotAssets = require(RS.Shared.BrainrotAssets)
+end)
+
+-- Different model path from the original King script: resolve through the
+-- game's BrainrotAssets provider first, then use the replicated cache only
+-- as a compatibility fallback.
+local function AcquireVisualAnimalModel(animalName)
+    local model = nil
+    if BrainrotAssets and type(BrainrotAssets.getModel) == "function" then
+        pcall(function()
+            local resolved = BrainrotAssets.getModel(animalName)
+            if resolved and resolved:IsA("Model") then
+                model = resolved:Clone()
+            end
+        end)
+    end
+    if not model then
+        local cached = RS:FindFirstChild("Models")
+            and RS.Models:FindFirstChild("Animals")
+            and RS.Models.Animals:FindFirstChild(animalName)
+        if cached then model = cached:Clone() end
+    end
+    if model then model:SetAttribute("KVModelMethod", "BrainrotAssetsProvider") end
+    return model
+end
+
+local SellRemote; pcall(function()
+    SellRemote = game:GetService("ReplicatedStorage"):FindFirstChild("RemoteEvents")
+        and game:GetService("ReplicatedStorage").RemoteEvents:FindFirstChild("PlotService/Sell")
+    if not SellRemote then
+        -- try direct path
+        SellRemote = game:GetService("ReplicatedStorage"):FindFirstChild("PlotService/Sell", true)
+    end
+end)
+
+local _syncChannel = nil
+pcall(function()
+    local sync = require(RS.Packages.Synchronizer)
+    sync:WaitAndCall(LocalPlayer, function(ch)
+        _syncChannel = ch
+    end)
+end)
+local function GetSyncChannel()
+    if _syncChannel then return _syncChannel end
+    pcall(function()
+        local sync = require(RS.Packages.Synchronizer)
+        _syncChannel = sync:GetAllChannels()[LocalPlayer]
+    end)
+    return _syncChannel
+end
+
+local function GetSafeParent()
+    if typeof(gethui)=="function" then
+        local ok,h=pcall(gethui); if ok and h then return h end
+    end
+    local ok2, pg = pcall(function() return LocalPlayer.PlayerGui end)
+    if ok2 and pg then return pg end
+    return CoreGui
+end
+
+-- ── THEME ────────────────────────────────────────────────
+local BG      = Color3.fromRGB(5,5,5)
+local SURFACE = Color3.fromRGB(15,15,15)
+local ACCENT  = Color3.fromRGB(92,92,92)
+local BORDER  = Color3.fromRGB(86,86,86)
+local TEXT    = Color3.fromRGB(245,245,245)
+local SUBTEXT = Color3.fromRGB(166,166,166)
+local ITEMHOV = Color3.fromRGB(28,28,28)
+local ITEMSEL = Color3.fromRGB(62,62,62)
+local BTNRED  = Color3.fromRGB(45,45,45)
+local BTNGRN  = Color3.fromRGB(65,65,65)
+
+-- Carbon Visuals uses a strict monochrome UI.  Keeping this conversion in one
+-- place also catches colours inherited from cloned game templates.
+local function CarbonColor(color)
+    if typeof(color) ~= "Color3" then return color end
+    local luminance = math.clamp(
+        math.floor((color.R * 0.2126 + color.G * 0.7152 + color.B * 0.0722) * 255 + 0.5),
+        0,
+        255
+    )
+    return Color3.fromRGB(luminance, luminance, luminance)
+end
+
+local CARBON_COLOR_PROPERTIES = {
+    "BackgroundColor3", "BorderColor3", "TextColor3", "PlaceholderColor3",
+    "ImageColor3", "ScrollBarImageColor3", "Color",
+}
+
+local function IsCarbonThemeExcluded(object)
+    local current = object
+    while current do
+        local excluded = false
+        pcall(function() excluded = current:GetAttribute("CarbonThemeExcluded") == true end)
+        if excluded then return true end
+        current = current.Parent
+    end
+    return false
+end
+
+local CARBON_SCREEN_NAMES = {
+    CarbonVisuals = true,
+    KV_TradeSetupPopOut = true,
+    KV_SignEditor = true,
+}
+
+local function IsCarbonInterfaceObject(object)
+    local current = object
+    while current do
+        if current:IsA("ScreenGui") then
+            return CARBON_SCREEN_NAMES[current.Name] == true
+        end
+        current = current.Parent
+    end
+    return false
+end
+
+local function CarbonThemeObject(object)
+    if not object then return end
+    if not IsCarbonInterfaceObject(object) then return end
+    if IsCarbonThemeExcluded(object) then return end
+    local alreadyBound = false
+    pcall(function() alreadyBound = object:GetAttribute("CarbonThemeBound") == true end)
+    for _, property in ipairs(CARBON_COLOR_PROPERTIES) do
+        pcall(function()
+            local current = object[property]
+            if typeof(current) == "Color3" then
+                object[property] = CarbonColor(current)
+                if not alreadyBound then
+                    object:GetPropertyChangedSignal(property):Connect(function()
+                        local updated = object[property]
+                        local monochrome = CarbonColor(updated)
+                        if updated ~= monochrome then object[property] = monochrome end
+                    end)
+                end
+            end
+        end)
+    end
+    if object:IsA("UIGradient") then
+        local points = {}
+        for _, keypoint in ipairs(object.Color.Keypoints) do
+            table.insert(points, ColorSequenceKeypoint.new(keypoint.Time, CarbonColor(keypoint.Value)))
+        end
+        if #points > 0 then object.Color = ColorSequence.new(points) end
+    end
+    if not alreadyBound then pcall(function() object:SetAttribute("CarbonThemeBound", true) end) end
+end
+
+local RARITY_COLORS = {
+    Common              = Color3.fromRGB(0,171,40),
+    Rare                = Color3.fromRGB(0,131,171),
+    Epic                = Color3.fromRGB(134,0,171),
+    Legendary           = Color3.fromRGB(251,255,0),
+    Mythic              = Color3.fromRGB(255,0,0),
+    ["Brainrot God"]    = Color3.fromRGB(255,0,221),
+    Secret              = Color3.fromRGB(44,44,44),
+    OG                  = BG,
+    Taco                = BG,
+    Admin               = BG,
+    Spooky              = BG,
+    Festive             = BG,
+    Valentines          = Color3.fromRGB(255,128,255),
+    ["St Patrick's"]    = Color3.fromRGB(142,227,63),
+    Easter              = Color3.fromRGB(178,132,255),
+}
+
+-- ── MUTATION PALETTES (from Datas.Mutations decompile) ───
+-- Each palette entry = color for Color attribute index 1..6
+local MUTATION_PALETTES = {
+    Gold        = {Color3.fromRGB(237,178,0),   Color3.fromRGB(237,194,86), Color3.fromRGB(215,111,1), Color3.fromRGB(139,74,0),   Color3.fromRGB(255,164,164),Color3.fromRGB(255,244,190)},
+    Diamond     = {Color3.fromRGB(37,196,254),  Color3.fromRGB(116,212,254),Color3.fromRGB(28,137,254),Color3.fromRGB(21,64,254),  Color3.fromRGB(160,162,254),Color3.fromRGB(176,255,252)},
+    Bloodrot    = {Color3.fromRGB(145,0,27),    Color3.fromRGB(154,94,100), Color3.fromRGB(75,0,7),    Color3.fromRGB(72,0,2),     Color3.fromRGB(121,112,112),Color3.fromRGB(255,152,154)},
+    Candy       = {Color3.fromRGB(255,105,180), Color3.fromRGB(255,182,193),Color3.fromRGB(200,50,150),Color3.fromRGB(255,20,147), Color3.fromRGB(255,200,220),Color3.fromRGB(255,240,245)},
+    Lava        = {Color3.fromRGB(200,50,0),    Color3.fromRGB(255,100,0),  Color3.fromRGB(150,20,0),  Color3.fromRGB(100,10,0),   Color3.fromRGB(255,160,0),  Color3.fromRGB(255,220,100)},
+    Galaxy      = {Color3.fromRGB(60,0,120),    Color3.fromRGB(100,0,180),  Color3.fromRGB(30,0,80),   Color3.fromRGB(180,0,255),  Color3.fromRGB(80,0,160),   Color3.fromRGB(200,150,255)},
+    YinYang     = {BG, Color3.fromRGB(20,20,28),Color3.fromRGB(230,230,240),     Color3.fromRGB(230,230,240),   Color3.fromRGB(128,128,128),Color3.fromRGB(14,12,15)},
+    Radioactive = {Color3.fromRGB(100,255,0),   Color3.fromRGB(150,255,50), Color3.fromRGB(50,200,0),  Color3.fromRGB(0,150,0),    Color3.fromRGB(200,255,100),Color3.fromRGB(230,255,180)},
+    Cursed      = {Color3.fromRGB(255,23,23),   Color3.fromRGB(180,0,0),    Color3.fromRGB(120,0,0),   Color3.fromRGB(80,0,0),     Color3.fromRGB(255,100,100),Color3.fromRGB(255,180,180)},
+    Divine      = {Color3.fromRGB(255,215,0),   Color3.fromRGB(255,255,200),Color3.fromRGB(200,160,0), Color3.fromRGB(255,240,150),BG,Color3.fromRGB(255,250,220)},
+}
+
+-- Mutations that have a MaterialVariant stud in MaterialService
+-- Format: mutationName -> stud variant name
+local MUTATION_STUDS = {
+    Galaxy      = "Galaxy Stud",
+    Cursed      = "Cursed Stud",
+    Divine      = "Divine Stud",
+    Radioactive = "Radioactive Stud",  -- some parts get Radioactive Stud2
+    Gold        = "Gold Stud",
+    Diamond     = "Diamond",
+    Bloodrot    = "Bloodrot",
+    Candy       = "Candy",
+    Lava        = "Lava",
+    YinYang     = "YinYang",
+}
+
+-- ── DATA ─────────────────────────────────────────────────
+local ANIMALS_BY_RARITY = {
+    {rarity="OG",     names={"Skibidi Toilet","Strawberry Elephant","Headless Horseman","Meowl","John Pork"}},
+    {rarity="Secret", names={"Dragon Cannelloni","Garama and Madundung","Elefanto Frigo","Signore Carapace","Fragola La La La","Love Love Bear","Hydra Dragon Cannelloni","Tang Tang Keletang","Ketchuru and Musturu","Burguro And Fryuro","La Secret Combinasion","Tictac Sahur","Cerberus","Capitano Moby","Foxini Lanternini","Antonio","Ginger Gerat","Fishino Clownino","Guerriro Digitale","Ginger Globo","Cappuccino Clownino","Griffin","La Supreme Combinasion","Arcadragon","Rosey and Teddy","Hydra Bunny","Ketupat Bros","Tirilikalika Tirilikalako","Pancake and Syrup","Cash or Card","Dragon Gingerini","Globa Steppa","Gym Bros","Money Money Bros","Dug dug dug","Digi Narwhal","Popcuru and Fizzuru","Reinito Sleighito","Los Amigos","Los Sekolahs","Los Spaghettis","Spaghetti Tualetti","Spooky and Pumpky","Ventoliero Pavonero","Quackini Snackini","Sammyni Fattini","Nacho Spyder","Rosetti Tualetti","Lavadorito Spinito","Las Sis","La Casa Boo","Fragrama and Chocrama","Cooki and Milki","Bunny and Eggy","Celestial Pegasus","Chillin Chili","Chipso and Queso","Cloverat Clapat"}},
+}
+local MUTATIONS = {"None","Gold","Diamond","Bloodrot","Rainbow","Candy","Lava","Galaxy","YinYang","Radioactive","Cursed","Divine","Cyber","Crystal"}
+
+local TRAITS = {
+    "Taco","Nyan","Galactic","Fireworks","Zombie","Claws","Glitched","Bubblegum",
+    "Fire","Wet","Snowy","Cometstruck","Explosive","Disco","10B","Shark Fin",
+    "Matteo Hat","Brazil","Sleepy","Lightning","UFO","Spider","Strawberry","Paint",
+    "Skeleton","Sombrero","Tie","Witch Hat","Indonesia","Meowl","John Pork","RIP Gravestone",
+    "Jackolantern Pet","Santa Hat","Reindeer Pet","Skibidi","26","Rose",":3",
+    "Chocolate","Halo","Lucky","Orange Balloon","Green Balloon","Blue Balloon",
+    "Red Balloon","Pink Balloon","Rainbow Balloon","Granny","Bunny Ears",
+    "Orange Egg","Green Egg","Blue Egg","Pink Egg",
+}
+
+local TRAIT_ICONS = {
+    ["Taco"]="rbxassetid://89041930759464",["Nyan"]="rbxassetid://104229924295526",
+    ["Galactic"]="rbxassetid://99181785766598",["Fireworks"]="rbxassetid://121100427764858",
+    ["Zombie"]="rbxassetid://110723387483939",["Claws"]="rbxassetid://104964195846833",
+    ["Glitched"]="rbxassetid://121332433272976",["Bubblegum"]="rbxassetid://100601425541874",
+    ["Fire"]="rbxassetid://118283346037788",["Wet"]="rbxassetid://78474194088770",
+    ["Snowy"]="rbxassetid://83627475909869",["Cometstruck"]="rbxassetid://127455440418221",
+    ["Explosive"]="rbxassetid://97725744252608",["Disco"]="rbxassetid://82620342632406",
+    ["10B"]="rbxassetid://134655415681926",["Shark Fin"]="rbxassetid://104985313532149",
+    ["Matteo Hat"]="rbxassetid://115664804212096",["Brazil"]="rbxassetid://75650816341229",
+    ["Sleepy"]="rbxassetid://115001117876534",["Lightning"]="rbxassetid://139729696247144",
+    ["UFO"]="rbxassetid://110910518481052",["Spider"]="rbxassetid://117478971325696",
+    ["Strawberry"]="rbxassetid://84731118566493",["Paint"]="rbxassetid://119591742504251",
+    ["Skeleton"]="rbxassetid://89591838221335",["Sombrero"]="rbxassetid://95128039793845",
+    ["Tie"]="rbxassetid://103610037004911",["Witch Hat"]="rbxassetid://123964048606874",
+    ["Indonesia"]="rbxassetid://93350414974589",["Meowl"]="rbxassetid://114748221761549",
+    ["John Pork"]="rbxassetid://117176397136731",
+    ["RIP Gravestone"]="rbxassetid://123115843719383",["Jackolantern Pet"]="rbxassetid://97054765273857",
+    ["Santa Hat"]="rbxassetid://88375043733582",["Reindeer Pet"]="rbxassetid://70894779883038",
+    ["Skibidi"]="rbxassetid://83384385019272",["26"]="rbxassetid://80468035315420",
+    ["Rose"]="rbxassetid://135489065859287",[":3"]="rbxassetid://108293878529172",
+    ["Chocolate"]="rbxassetid://81641382604997",["Halo"]="rbxassetid://98316436141359",
+    ["Lucky"]="rbxassetid://124098467754457",["Orange Balloon"]="rbxassetid://83111173051279",
+    ["Green Balloon"]="rbxassetid://75222826429094",["Blue Balloon"]="rbxassetid://128841931686463",
+    ["Red Balloon"]="rbxassetid://119661964026012",["Pink Balloon"]="rbxassetid://114128099162490",
+    ["Rainbow Balloon"]="rbxassetid://112821854659961",["Granny"]="rbxassetid://73467619616299",
+    ["Bunny Ears"]="rbxassetid://118516289496954",["Orange Egg"]="rbxassetid://76307362192037",
+    ["Green Egg"]="rbxassetid://94602857440295",["Blue Egg"]="rbxassetid://109212886335786",
+    ["Pink Egg"]="rbxassetid://133939661230277",
+}
+
+local LIVE_MUTATION_DATA = {}
+local LIVE_TRAIT_DATA = {}
+pcall(function() LIVE_MUTATION_DATA = require(RS.Datas.Mutations) end)
+pcall(function() LIVE_TRAIT_DATA = require(RS.Datas.Traits) end)
+
+local function _appendMissingDataNames(target, source)
+    local present = {}
+    for _, name in ipairs(target) do present[name] = true end
+    local missing = {}
+    for name in pairs(source) do
+        if type(name) == "string" and not present[name] then
+            table.insert(missing, name)
+        end
+    end
+    table.sort(missing)
+    for _, name in ipairs(missing) do
+        table.insert(target, name)
+    end
+end
+
+local function _iconAsset(value)
+    if type(value) == "number" then
+        return "rbxassetid://"..tostring(value)
+    end
+    if type(value) == "string" then
+        if value:match("^rbxassetid://") then return value end
+        if value:match("^%d+$") then return "rbxassetid://"..value end
+        return value
+    end
+    return nil
+end
+
+_appendMissingDataNames(MUTATIONS, LIVE_MUTATION_DATA)
+_appendMissingDataNames(TRAITS, LIVE_TRAIT_DATA)
+for name, data in pairs(LIVE_TRAIT_DATA) do
+    if type(data) == "table" then
+        local icon = _iconAsset(data.Icon or data.Image or data.Texture)
+        if icon then TRAIT_ICONS[name] = icon end
+    end
+end
+
+-- ── HELPERS ──────────────────────────────────────────────
+-- "John Pork" trait reskins any brainrot wearing it to mimic the real game's
+-- "John Pork is Calling..." event — the overhead nametag gets a suffix.
+-- Accepts either array form {"Galactic","John Pork"} or hash form {[name]=true}.
+local function _hasJohnPorkTrait(traits)
+    if type(traits) ~= "table" then return false end
+    if traits["John Pork"] then return true end
+    for _, t in ipairs(traits) do
+        if t == "John Pork" then return true end
+    end
+    return false
+end
+
+local function _displayNameFor(name, traits)
+    if not name or name == "" then return name end
+    if _hasJohnPorkTrait(traits) then
+        return name .. " is Calling..."
+    end
+    return name
+end
+
+-- ── Animation sync helpers ───────────────────────────────
+-- Brainrot models each load their own AnimationTrack on their Humanoid's
+-- Animator at whatever phase the engine loaded them at — so two of the same
+-- brainrot end up out-of-sync.  Rather than snap them all back to 0
+-- (which makes the animation visibly restart), we anchor every looped
+-- track to a shared global clock: target = (tick() - epoch) mod length.
+-- Every model converges on the same phase and *stays* there — they advance
+-- together naturally instead of resetting.  We only write TimePosition when
+-- the drift exceeds ~100ms, so most resync ticks are no-ops (no visible jump).
+local _animSyncEpoch = tick()
+local _ANIM_SYNC_THRESHOLD = 0.1
+
+local function _syncModelAnimations(model)
+    if not model or not model.Parent then return end
+    pcall(function()
+        local controller = model:FindFirstChildWhichIsA("Humanoid", true)
+            or model:FindFirstChildWhichIsA("AnimationController", true)
+        if not controller then return end
+        local animator = controller:FindFirstChildOfClass("Animator")
+        if not animator then return end
+        local globalPhase = tick() - _animSyncEpoch
+        for _, tr in ipairs(animator:GetPlayingAnimationTracks()) do
+            if tr.Looped and tr.Length and tr.Length > 0 then
+                local target = globalPhase % tr.Length
+                local drift  = math.abs(tr.TimePosition - target)
+                -- handle wrap-around (e.g. track at 0.05s vs target at 1.95s on a 2s loop)
+                if drift > tr.Length * 0.5 then
+                    drift = tr.Length - drift
+                end
+                if drift > _ANIM_SYNC_THRESHOLD then
+                    tr.TimePosition = target
+                end
+            end
+        end
+    end)
+end
+
+local function SafeSet(o,p,v) pcall(function() o[p]=v end) end
+local function New(cls,props)
+    local ok,obj=pcall(Instance.new,cls)
+    if not ok or not obj then return nil end
+    if props then for k,v in pairs(props) do SafeSet(obj,k,v) end end
+    if IsCarbonInterfaceObject(obj) then CarbonThemeObject(obj) end
+    if IsCarbonInterfaceObject(obj) and not IsCarbonThemeExcluded(obj)
+        and (obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox")) then
+        pcall(function()
+            if not obj.TextScaled then
+                obj.TextSize = math.clamp(math.floor(obj.TextSize * 1.22 + 0.5), 12, 26)
+            end
+        end)
+    end
+    return obj
+end
+
+local function CarbonThemeTree(root)
+    if not root then return end
+    CarbonThemeObject(root)
+    for _, descendant in ipairs(root:GetDescendants()) do
+        CarbonThemeObject(descendant)
+    end
+end
+local function Corner(p,r)
+    local c=Instance.new("UICorner"); c.CornerRadius=UDim.new(0,r or 6); c.Parent=p; return c
+end
+local function MakeDraggable(frame,handle)
+    handle=handle or frame
+    local drag,ds,sp
+    handle.InputBegan:Connect(function(i)
+        if i.UserInputType==Enum.UserInputType.MouseButton1 then
+            drag=true; ds=i.Position; sp=frame.Position
+        end
+    end)
+    handle.InputEnded:Connect(function(i)
+        if i.UserInputType==Enum.UserInputType.MouseButton1 then drag=false end
+    end)
+    UserInputService.InputChanged:Connect(function(i)
+        if drag and i.UserInputType==Enum.UserInputType.MouseMovement then
+            local d=i.Position-ds
+            frame.Position=UDim2.new(sp.X.Scale,sp.X.Offset+d.X,sp.Y.Scale,sp.Y.Offset+d.Y)
+        end
+    end)
+end
+local function SectionHeader(parent,text,yPos)
+    New("Frame",{Size=UDim2.new(0,3,0,14),Position=UDim2.new(0,10,0,yPos+2),BackgroundColor3=ACCENT,BorderSizePixel=0,Parent=parent})
+    New("TextLabel",{Size=UDim2.new(1,-28,0,18),Position=UDim2.new(0,18,0,yPos),Text=text:upper(),TextColor3=Color3.fromRGB(230,230,240),Font=Enum.Font.GothamBold,TextSize=9,BackgroundTransparency=1,TextXAlignment=Enum.TextXAlignment.Left,Parent=parent})
+end
+
+-- ── PLOT HELPERS ─────────────────────────────────────────
+-- Resolve the local player's plot from ownership markers and keep that exact
+-- plot locked for spawning, base skins, lasers, and prompts.
+local _lockedPlot = nil
+local function IsOwnedPlot(plot)
+  
